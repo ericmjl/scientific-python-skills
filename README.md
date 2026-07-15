@@ -17,6 +17,15 @@ Claude Code [skill files](https://code.claude.com/docs/en/skills) that teach Cla
 - numpy, scipy, pandas, polars, matplotlib
 - Integration skill (using zarr + xarray + icechunk together)
 
+### Domain Skills
+
+Folder-based skills with reference docs and runnable notebooks, covering
+patterns that span beyond a single library version:
+
+| Skill | Focus |
+|-------|-------|
+| [xarray-linked-data](skills/xarray-linked-data/SKILL.md) | Designing xarray `Dataset`/`DataTree` for highly linked multi-assay data; custom indexes (`PeriodicIndex`, `CoordinateTransform`, `NDIndex`, `DimensionInterval`); cross-experiment linking |
+
 ## How to Use
 
 ### Option 1: Add to Your Project (Recommended)
@@ -119,6 +128,7 @@ skills/           # The deliverables - skill files for Claude Code
   xarray.md
   icechunk.md
   TEMPLATE.md
+  xarray-linked-data/    # Folder skill: SKILL.md + references/ + notebooks/
 research/         # Research artifacts per library
   {lib}/
     docs_summary.md      # Docs + source analysis
