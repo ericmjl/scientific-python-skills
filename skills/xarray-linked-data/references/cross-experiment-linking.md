@@ -139,26 +139,51 @@ defined at the root is visible in every child -- no duplication.
 
 ## Pattern: custom index for cross-experiment selection
 
-When experiments share a derived relationship (e.g. dose-response curves
-measured at different time points), use a custom index to link selection
-across experiment boundaries.
+When experiments share a derived relationship (e.g. a dose-escalation time
+course where each concentration is administered over a specific time window),
+use a custom index to link selection across axes.
 
 ### Example: concentration-time linking
 
-Dose-response data measured at multiple time points. The concentration axis
-and time axis are linked: selecting a concentration range should constrain
-the time axis to measurements taken at that concentration.
+A dose-escalation time course: each concentration is administered over a
+specific time window, and response is measured continuously. Selecting a
+concentration should auto-constrain time to its administration window, and
+selecting a time range should auto-constrain to the concentrations that were
+active then.
 
 ```python
-# Build a DimensionInterval linking concentration and time
-ds = ds.drop_indexes(["time_hr", "concentration_um"]).set_xindex(
-    ["time_hr", "concentration_intervals", "time_intervals", "concentration_um"],
+import pandas as pd
+
+# Build the Dataset: time is continuous, dose_conc is the (possibly
+# duplicated) concentration label, dose_intervals is the time window each
+# concentration was administered over.
+ds = xr.Dataset(
+    data_vars={"response": (["time"], response_signal)},
+    coords={
+        "time": time_points,
+        "dose_conc": dose_conc_values,  # e.g. [0, 1, 10, 100, 0] nM
+        "dose_intervals": ("dose_conc", pd.IntervalIndex.from_breaks(
+            [0, 30, 80, 140, 200, 240], closed="left"
+        )),
+    },
+)
+
+# Register DimensionInterval linking time, dose_intervals, and dose_conc
+ds = ds.drop_indexes(["time", "dose_conc"]).set_xindex(
+    ["time", "dose_intervals", "dose_conc"],
     DimensionInterval,
 )
 
-# Select a concentration window -- time auto-constrained
-ds.sel(concentration_intervals=100)  # all data at ~100uM, across time
+# Selecting a concentration auto-constrains time to its administration window
+ds.sel(dose_conc=100)  # time auto-constrained to [140, 200]
+
+# Selecting a time range auto-constrains to the concentrations active then
+ds.sel(time=slice(50, 100))  # dose_conc auto-constrained to [1, 10]
 ```
+
+See [notebook 04](../notebooks/04_linked_intervals_cross_slicing.py) for the
+full worked example, including duplicate concentrations (baseline and washout
+both at 0 nM) and bidirectional cross-slicing.
 
 ## Pattern: merge and concat
 

@@ -54,11 +54,11 @@ def cell_tour(mo):
         steps=[
             {"cell_name": "hero", "title": "Linked Intervals", "description": "DimensionInterval: selecting on one dimension constrains all others."},
             {"cell_name": "dimensioninterval_class", "title": "DimensionInterval Index", "description": "A meta-index that links interval coordinates over a shared continuous dimension."},
-            {"cell_name": "build_dose_timecourse", "title": "Dose-Response Data", "description": "Time-course with dose levels administered over sequential windows."},
+            {"cell_name": "build_dose_timecourse", "title": "Dose-Response Data", "description": "Time-course with concentrations administered over sequential windows."},
             {"cell_name": "dose_timecourse_plot", "title": "The Data, Visualized", "description": "Stepped dose-response over time -- dose windows (solid) and offset measurement windows (dotted) sharing the time axis."},
-            {"cell_name": "verify_cross_slicing", "title": "Cross-Slicing", "description": "Selecting on time constrains dose levels and vice versa."},
+            {"cell_name": "verify_cross_slicing", "title": "Cross-Slicing", "description": "Selecting on time constrains concentrations and vice versa."},
             {"cell_name": "crossslice_query", "title": "Explorer Controls", "description": "Pick which dimension to slice on."},
-            {"cell_name": "crossslice_plot", "title": "Linked Dimensions Constrain", "description": "Watch selecting one axis highlight the surviving dose levels and measurement windows."},
+            {"cell_name": "crossslice_plot", "title": "Linked Dimensions Constrain", "description": "Watch selecting one axis highlight the surviving concentrations and measurement windows."},
             {"cell_name": "epoch_demo", "title": "Dose-Response Fit", "description": "Extract per-dose windows with one .sel() call, then fit a sigmoidal dose-response curve."},
         ],
         auto_start=False,
@@ -282,8 +282,11 @@ def build_dose_timecourse(np, pd, xr):
     # Continuous time axis: 0-240 minutes, 1-min resolution
     time_points = np.arange(0, 240, dtype=float)
 
-    # Dose levels administered in sequence (each over a time window)
-    dose_labels = ["baseline", "low", "medium", "high", "washout"]
+    # Dose concentrations administered in sequence (nM).
+    # Baseline and washout both carry 0 nM (vehicle); the DimensionInterval
+    # index handles duplicate concentrations fine -- sel(dose_conc=0) returns
+    # both phases, and per-phase selection goes through dose_intervals.
+    dose_conc_values = np.array([0.0, 1.0, 10.0, 100.0, 0.0])
     dose_intervals = pd.IntervalIndex.from_breaks(
         [0, 30, 80, 140, 200, 240], closed="left"
     )
@@ -296,25 +299,27 @@ def build_dose_timecourse(np, pd, xr):
 
     # Synthetic signal: baseline + dose-dependent response.
     # Seeded RNG for reproducible renders (matches nb03).
+    # Keyed by phase position (not by concentration) since baseline and washout
+    # share the same concentration value.
     rng = np.random.default_rng(42)
-    dose_responses = {"baseline": 0.1, "low": 0.5, "medium": 1.2, "high": 2.0, "washout": 0.3}
+    phase_responses = np.array([0.1, 0.5, 1.2, 2.0, 0.3])
     signal = np.full(240, 0.1)
-    for di_idx, di_label in enumerate(dose_labels):
+    for di_idx, resp in enumerate(phase_responses):
         mask = (time_points >= dose_intervals[di_idx].left) & (time_points < dose_intervals[di_idx].right)
-        signal[mask] = dose_responses[di_label] + rng.normal(0, 0.05, mask.sum())
+        signal[mask] = resp + rng.normal(0, 0.05, mask.sum())
 
     dose_ds = xr.Dataset(
         data_vars={"response": (["time"], signal)},
         coords={
             "time": time_points,
-            "dose_intervals": ("dose_level", dose_intervals),
-            "dose_level": dose_labels,
+            "dose_intervals": ("dose_conc", dose_intervals),
+            "dose_conc": dose_conc_values,
             "meas_intervals": ("meas_window", meas_intervals),
             "meas_window": meas_labels,
         },
     )
     print(f"Dose-response time-course: {len(time_points)} time points")
-    print(f"Dose levels: {dose_labels}")
+    print(f"Concentrations (nM): {dose_conc_values}")
     print(f"Windows: {[f'[{iv.left},{iv.right})' for iv in dose_intervals]}")
 
     return (dose_ds,)
@@ -324,13 +329,19 @@ def build_dose_timecourse(np, pd, xr):
 def dose_timecourse_plot(dose_ds, go, mo, np):
     _time = np.asarray(dose_ds.time.values, dtype=float)
     _resp = np.asarray(dose_ds.response.values, dtype=float)
-    _dose_labels = list(np.asarray(dose_ds.dose_level.values).astype(str))
+    _dose_conc = np.asarray(dose_ds.dose_conc.values)
     _dose_iv = np.asarray(dose_ds.dose_intervals.values)
     _meas_iv = np.asarray(dose_ds.meas_intervals.values)
     _meas_labels = list(np.asarray(dose_ds.meas_window.values).astype(str))
 
     _palette = ["#5b6478", "#c4a6d8", "#e94e77", "#7c3aed", "#3a5a40"]
     _ink = "#f0f9ff"
+
+    # Human-readable phase labels: disambiguate the two zero-concentration phases
+    _phase_labels = [
+        f"{c:.0f} nM ({p})" if c == 0 else f"{c:g} nM"
+        for c, p in zip(_dose_conc, ["baseline", "", "", "", "washout"])
+    ]
 
     _fig = go.Figure()
     _fig.add_trace(go.Scatter(
@@ -340,7 +351,7 @@ def dose_timecourse_plot(dose_ds, go, mo, np):
         hovertemplate="t=%{x:.0f} min<br>response=%{y:.2f}<extra></extra>",
     ))
     # dose administration windows (solid band, labelled at top)
-    for _lab, _iv, _col in zip(_dose_labels, _dose_iv, _palette):
+    for _lab, _iv, _col in zip(_phase_labels, _dose_iv, _palette):
         _fig.add_vrect(
             x0=float(_iv.left), x1=float(_iv.right),
             fillcolor=_col, opacity=0.18, layer="below", line_width=0,
@@ -377,8 +388,10 @@ def dose_timecourse_plot(dose_ds, go, mo, np):
             "sequential time window (solid shaded band, labelled above), and response "
             "is measured continuously. The **measurement windows** (dotted brackets "
             "below) are deliberately offset from the dose windows. The `DimensionInterval` "
-            "index links all three axes -- `time`, `dose_level`, `meas_window` -- over the "
-            "shared continuous `time` dimension."
+            "index links all three axes -- `time`, `dose_conc`, `meas_window` -- over the "
+            "shared continuous `time` dimension. Note that baseline and washout share "
+            "the concentration value 0 nM; the index treats them as distinct phases "
+            "because their `dose_intervals` differ."
         ),
     ])
 
@@ -387,9 +400,9 @@ def dose_timecourse_plot(dose_ds, go, mo, np):
 
 @app.cell
 def attach_diminterval(DimensionInterval, dose_ds):
-    # Attach DimensionInterval linking time, dose_level, and meas_window
-    dose_ds_linked = dose_ds.drop_indexes(["time", "dose_level"]).set_xindex(
-        ["time", "dose_intervals", "dose_level", "meas_intervals", "meas_window"],
+    # Attach DimensionInterval linking time, dose_conc, and meas_window
+    dose_ds_linked = dose_ds.drop_indexes(["time", "dose_conc"]).set_xindex(
+        ["time", "dose_intervals", "dose_conc", "meas_intervals", "meas_window"],
         DimensionInterval,
     )
     print("DimensionInterval attached. Selecting on any dimension constrains all others.")
@@ -398,29 +411,38 @@ def attach_diminterval(DimensionInterval, dose_ds):
 
 @app.cell
 def verify_cross_slicing(dose_ds_linked, mo, pd):
-    # Verify: selecting a time range constrains dose_level to overlapping windows
+    # Verify: selecting a time range constrains dose_conc to overlapping windows.
+    # Time 50-100 overlaps with 1 nM [30,80) and 10 nM [80,140).
     time_slice = dose_ds_linked.sel(time=slice(50, 100))
-    # Time 50-100 overlaps with "low" [30,80) and "medium" [80,140)
-    assert "low" in time_slice.dose_level.values, f"Expected 'low' in dose levels, got {time_slice.dose_level.values}"
-    assert "medium" in time_slice.dose_level.values, f"Expected 'medium' in dose levels"
+    assert 1.0 in time_slice.dose_conc.values, f"Expected 1.0 in dose_conc, got {time_slice.dose_conc.values}"
+    assert 10.0 in time_slice.dose_conc.values, f"Expected 10.0 in dose_conc"
 
-    # Verify: selecting a dose level constrains time to its window
-    high_only = dose_ds_linked.sel(dose_level="high")
-    # "high" window is [140, 200). Pandas label-slicing is end-inclusive, so the
+    # Verify: selecting a concentration constrains time to its window.
+    # 100 nM window is [140, 200). Pandas label-slicing is end-inclusive, so the
     # right boundary point (t=200) is carried along -- the selection spans [140, 200].
+    high_only = dose_ds_linked.sel(dose_conc=100.0)
     assert high_only.time.values[0] >= 140, f"Expected time >= 140, got {high_only.time.values[0]}"
     assert high_only.time.values[-1] <= 200, f"Expected time <= 200, got {high_only.time.values[-1]}"
 
-    # Verify: selecting a dose interval by value constrains everything
-    medium_interval = dose_ds_linked.sel(dose_intervals=pd.Interval(80, 140, closed="left"))
-    assert "medium" in medium_interval.dose_level.values
+    # Verify: selecting an interval directly constrains everything.
+    # 10 nM was administered over [80, 140).
+    ten_nm_interval = dose_ds_linked.sel(dose_intervals=pd.Interval(80, 140, closed="left"))
+    assert 10.0 in ten_nm_interval.dose_conc.values
+
+    # Verify: duplicate concentrations behave correctly.
+    # Both baseline and washout carry dose_conc=0; sel(dose_conc=0) returns both phases.
+    both_zero = dose_ds_linked.sel(dose_conc=0.0)
+    assert len(both_zero.dose_intervals.values) == 2, (
+        f"Expected 2 phases at dose_conc=0 (baseline + washout), got {len(both_zero.dose_intervals.values)}"
+    )
 
     mo.callout(
         mo.md("""
         **Cross-slicing verified:**
-        - `sel(time=slice(50, 100))` constrains dose_level to ["low", "medium"]
-        - `sel(dose_level="high")` constrains time to the high window [140, 200]
-        - `sel(dose_intervals=Interval(80,140,closed="left"))` constrains dose_level to ["medium"]
+        - `sel(time=slice(50, 100))` constrains dose_conc to [1.0, 10.0]
+        - `sel(dose_conc=100)` constrains time to the 100 nM window [140, 200]
+        - `sel(dose_intervals=Interval(80,140,closed="left"))` constrains dose_conc to [10.0]
+        - `sel(dose_conc=0)` returns BOTH baseline and washout (duplicate concentration handled correctly)
 
         Selecting on ANY dimension automatically constrains ALL others.
         """),
@@ -432,22 +454,22 @@ def verify_cross_slicing(dose_ds_linked, mo, pd):
 
 @app.cell(hide_code=True)
 def crossslice_query(dose_ds_linked, mo):
-    _dose_levels = list(dose_ds_linked.dose_level.values)
+    _dose_concs = [float(c) for c in dose_ds_linked.dose_conc.values]
     _windows = list(dose_ds_linked.meas_window.values)
 
     sel_mode = mo.ui.radio(
-        ["by dose level", "by time window", "by measurement window"],
-        value="by dose level",
+        ["by concentration", "by time window", "by measurement window"],
+        value="by concentration",
         label="Slice on ONE dimension",
     )
-    dose_pick = mo.ui.dropdown(_dose_levels, value="medium", label="dose level")
+    dose_pick = mo.ui.dropdown(_dose_concs, value=10.0, label="dose concentration (nM)")
     time_pick = mo.ui.range_slider(0, 240, value=[50, 100], step=5, label="time window (min)")
     win_pick = mo.ui.dropdown(_windows, value="window_2", label="measurement window")
 
     mo.vstack([
         mo.md("### Cross-slicing explorer"),
         mo.md(
-            "The `DimensionInterval` index links `time`, `dose_level`, and `meas_window`. "
+            "The `DimensionInterval` index links `time`, `dose_conc`, and `meas_window`. "
             "Select on **any one** and the others automatically constrain to overlapping "
             "values -- no manual bookkeeping."
         ),
@@ -471,9 +493,9 @@ def crossslice_plot(
 ):
     _mode = sel_mode.value
 
-    if _mode == "by dose level":
-        _subset = dose_ds_linked.sel(dose_level=dose_pick.value)
-        _on = f"dose_level = <b>{dose_pick.value}</b>"
+    if _mode == "by concentration":
+        _subset = dose_ds_linked.sel(dose_conc=dose_pick.value)
+        _on = f"dose_conc = <b>{dose_pick.value:g} nM</b>"
     elif _mode == "by time window":
         _t0, _t1 = time_pick.value
         _subset = dose_ds_linked.sel(time=slice(_t0, _t1))
@@ -487,11 +509,18 @@ def crossslice_plot(
     _sel_time = np.atleast_1d(np.asarray(_subset.time.values, dtype=float))
     _mask = np.isin(_full_time, _sel_time)
 
-    _surv_dose = list(np.atleast_1d(np.asarray(_subset.dose_level.values)).astype(str))
-    _surv_win = list(np.atleast_1d(np.asarray(_subset.meas_window.values)).astype(str))
+    # Track survival by dose_intervals (unique per phase), not by concentration
+    # (which can be duplicated: baseline and washout both at 0 nM).
+    _surv_intervals = list(np.atleast_1d(np.asarray(_subset.dose_intervals.values)))
+    _surv_conc = list(np.atleast_1d(np.asarray(_subset.dose_conc.values)))
+    _surv_win = list(np.atleast_1d(np.asarray(_subset.meas_window.values).astype(str)))
 
-    _dose_labels = list(np.asarray(dose_ds_linked.dose_level.values).astype(str))
+    _dose_concs = list(np.asarray(dose_ds_linked.dose_conc.values))
     _dose_iv = np.asarray(dose_ds_linked.dose_intervals.values)
+    _phase_labels = [
+        f"{c:.0f} ({p})" if c == 0 else f"{c:g}"
+        for c, p in zip(_dose_concs, ["base", "", "", "", "wash"])
+    ]
 
     _accent, _pale, _ink = "#e94e77", "#c4a6d8", "#f0f9ff"
     _fig = go.Figure()
@@ -506,8 +535,8 @@ def crossslice_plot(
             line=dict(color=_accent, width=3),
             name="cross-slice", hovertemplate="t=%{x:.0f}<br>response=%{y:.2f}<extra></extra>",
         ))
-    for _lab, _iv in zip(_dose_labels, _dose_iv):
-        _alive = _lab in _surv_dose
+    for _lab, _iv in zip(_phase_labels, _dose_iv):
+        _alive = any(_iv == _si for _si in _surv_intervals)
         _fig.add_vrect(
             x0=float(_iv.left), x1=float(_iv.right),
             fillcolor=_accent if _alive else "#241a2e",
@@ -528,7 +557,7 @@ def crossslice_plot(
 
     _n_sel = int(_mask.sum())
 
-    def _cards(on, surv_d, surv_w, n_sel):
+    def _cards(on, surv_c, surv_w, n_sel):
         def _row(nm, val, color):
             return (
                 f'<div style="flex:1;min-width:140px;background:#10171f;border:1.5px solid {color}33;'
@@ -541,14 +570,14 @@ def crossslice_plot(
             f'<div style="font-family:-apple-system,system-ui,sans-serif;">'
             f'<div style="color:{_ink};font-size:13px;margin:2px 0 11px;">Selected {on} &rarr; {n_sel} time points survive the cross-slice.</div>'
             f'<div style="display:flex;gap:10px;flex-wrap:wrap;">'
-            f'{_row("surviving dose levels", ", ".join(surv_d) or chr(8212), _accent)}'
+            f'{_row("surviving conc (nM)", ", ".join(f"{c:g}" for c in surv_c) or chr(8212), _accent)}'
             f'{_row("surviving meas windows", ", ".join(surv_w) or chr(8212), _pale)}'
             f'</div></div>'
         )
 
     mo.vstack([
         _fig,
-        mo.Html(_cards(_on, _surv_dose, _surv_win, _n_sel)),
+        mo.Html(_cards(_on, _surv_conc, _surv_win, _n_sel)),
     ])
 
     return
@@ -566,33 +595,46 @@ def epoching_header(mo):
 
 
 @app.cell(hide_code=True)
-def epoch_demo(curve_fit, dose_ds_linked, go, make_subplots, mo, np):
-    # Each dose window is a single .sel() away -- the linked index does the bookkeeping.
-    _order = ["baseline", "low", "medium", "high", "washout"]
-    _conc_map = {"baseline": 0.01, "low": 1.0, "medium": 10.0, "high": 100.0, "washout": 0.0}
+def epoch_demo(curve_fit, dose_ds_linked, go, make_subplots, mo, np, pd):
+    # Each phase is uniquely identified by its dose_interval on the time axis.
+    # We select by dose_intervals (not dose_conc) because baseline and washout
+    # share the concentration 0 nM -- dose_intervals disambiguates them.
+    _phase_intervals = [
+        pd.Interval(0, 30, closed="left"),     # baseline (0 nM)
+        pd.Interval(30, 80, closed="left"),    # 1 nM
+        pd.Interval(80, 140, closed="left"),   # 10 nM
+        pd.Interval(140, 200, closed="left"),  # 100 nM
+        pd.Interval(200, 240, closed="left"),  # washout (0 nM again)
+    ]
+    _phase_concs = [0.0, 1.0, 10.0, 100.0, 0.0]
+    _phase_names = ["baseline", "1 nM", "10 nM", "100 nM", "washout"]
 
     _dose_means = {}
-    for _dl in _order:
-        _dose_means[_dl] = float(dose_ds_linked.sel(dose_level=_dl)["response"].mean().values)
+    for _name, _iv in zip(_phase_names, _phase_intervals):
+        _phase_ds = dose_ds_linked.sel(dose_intervals=_iv)
+        _dose_means[_name] = float(_phase_ds["response"].mean().values)
 
     # Sanity: the synthetic dose ladder is recovered via linked-interval selection.
     assert 0.0 < _dose_means["baseline"] < 0.3
-    assert 1.0 < _dose_means["medium"] < 1.4
-    assert 1.8 < _dose_means["high"] < 2.2
+    assert 0.3 < _dose_means["1 nM"] < 0.7
+    assert 1.0 < _dose_means["10 nM"] < 1.4
+    assert 1.8 < _dose_means["100 nM"] < 2.2
 
     # Sigmoidal dose-response over the ascending ladder (washout excluded -- it is a
-    # return-to-baseline, not a dose step). Floor is fixed to the baseline response,
-    # leaving 3 free parameters for 4 points (well-determined fit).
-    _ascend = ["baseline", "low", "medium", "high"]
-    _x = np.array([_conc_map[_d] for _d in _ascend], dtype=float)
-    _y = np.array([_dose_means[_d] for _d in _ascend], dtype=float)
+    # return-to-baseline, not a dose step). Baseline concentration is 0 nM in the data
+    # structure (honest), but log(0) is undefined so the fit uses 0.01 nM as baseline's
+    # x-value -- standard pharmacological practice for log-axis plotting. Floor of the
+    # sigmoid is fixed at the baseline response, leaving 3 free parameters for 4 points.
+    _ascending_names = ["baseline", "1 nM", "10 nM", "100 nM"]
+    _x = np.array([0.01, 1.0, 10.0, 100.0], dtype=float)
+    _y = np.array([_dose_means[n] for n in _ascending_names], dtype=float)
     _floor = _y[0]
 
     def _sigmoid(_xv, top, ec50, hill):
         return _floor + (top - _floor) / (1.0 + (ec50 / _xv) ** hill)
 
     _popt, _ = curve_fit(
-        _sigmoid, _x, _y, p0=[_y[-1], 3.0, 1.0],
+        _sigmoid, _x, _y, p0=[2.0, 3.0, 1.0],
         bounds=([1.0, 0.01, 0.1], [3.0, 100.0, 5.0]), maxfev=20000,
     )
     _top, _ec50, _hill = _popt
@@ -600,8 +642,11 @@ def epoch_demo(curve_fit, dose_ds_linked, go, make_subplots, mo, np):
 
     _full_time = np.asarray(dose_ds_linked.time.values, dtype=float)
     _full_resp = np.asarray(dose_ds_linked.response.values, dtype=float)
-    _dose_labels = list(np.asarray(dose_ds_linked.dose_level.values).astype(str))
     _dose_iv = np.asarray(dose_ds_linked.dose_intervals.values)
+    _phase_labels = [
+        f"{c:.0f} ({p})" if c == 0 else f"{c:g} nM"
+        for c, p in zip(_phase_concs, ["baseline", "", "", "", "washout"])
+    ]
 
     _accent, _pale, _ink = "#e94e77", "#c4a6d8", "#f0f9ff"
     _fig = make_subplots(
@@ -617,7 +662,7 @@ def epoch_demo(curve_fit, dose_ds_linked, go, make_subplots, mo, np):
         ),
         row=1, col=1,
     )
-    for _lab, _iv in zip(_dose_labels, _dose_iv):
+    for _lab, _iv, _mean in zip(_phase_labels, _dose_iv, [_dose_means[n] for n in _phase_names]):
         _cx = (float(_iv.left) + float(_iv.right)) / 2
         _fig.add_vrect(
             x0=float(_iv.left), x1=float(_iv.right), row=1, col=1,
@@ -625,14 +670,14 @@ def epoch_demo(curve_fit, dose_ds_linked, go, make_subplots, mo, np):
         )
         _fig.add_trace(
             go.Scatter(
-                x=[_cx], y=[_dose_means[_lab]], mode="markers",
+                x=[_cx], y=[_mean], mode="markers",
                 marker=dict(color=_accent, size=9, line=dict(color=_ink, width=1)),
                 name=_lab, showlegend=False,
                 hovertemplate=f"{_lab}<br>mean=%{{y:.2f}}<extra></extra>",
             ),
             row=1, col=1,
         )
-    _x_smooth = np.logspace(-2, 2.2, 200)
+    _x_smooth = np.logspace(-1, 2.2, 200)
     _fig.add_trace(
         go.Scatter(
             x=_x, y=_y, mode="markers",
@@ -667,9 +712,11 @@ def epoch_demo(curve_fit, dose_ds_linked, go, make_subplots, mo, np):
     mo.vstack([
         _fig,
         mo.md(
-            f"**One `.sel(dose_level=...)` per window** extracts each epoch via the linked "
-            f"`DimensionInterval` -- no manual time indexing. Fitting a sigmoidal "
-            f"dose-response (floor fixed at baseline) to the ascending ladder recovers "
+            f"**One `.sel(dose_intervals=...)` per window** extracts each epoch via the linked "
+            f"`DimensionInterval` -- no manual time indexing. Selecting by `dose_intervals` "
+            f"(rather than `dose_conc`) keeps baseline and washout distinct even though both "
+            f"carry concentration 0. Fitting a sigmoidal dose-response (floor fixed at baseline) "
+            f"to the ascending ladder recovers "
             f"EC50 \u2248 **{_ec50:.1f} nM** (Hill \u2248 {_hill:.2f}, ceiling {_top:.2f}). "
             f"`washout` is excluded from the fit -- it is a return-to-baseline, not a dose step."
         ),
